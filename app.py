@@ -31,7 +31,7 @@ client = OpenAI(api_key=POE_API_KEY, base_url="https://api.poe.com/v1")
 
 @st.cache_data(ttl=300)
 def load_world_model():
-    base = "https://raw.githubusercontent.com/YOUR-USERNAME/your-company-world-model/main/wiki/"
+    base = "https://raw.githubusercontent.com/kool-ltd/kool-world-model/main/wiki/"
     context = ""
     for f in ["schema.md", "index.md"]:
         try:
