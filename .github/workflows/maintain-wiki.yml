@@ -7,7 +7,7 @@ on:
     - cron: '0 3 * * *'
 
 permissions:
-  contents: write   # ← critical for git push
+  contents: write
 
 jobs:
   update:
@@ -15,17 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}   # built-in token now works here
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install deps
-        run: npm ci
+      - name: Install dependencies
+        run: npm install          # ← Changed from npm ci (this fixes your error)
 
-      - name: Run maintenance (LLM writes files)
+      - name: Run maintenance (LLM updates wiki)
         run: node maintain.js
         env:
           POE_API_KEY: ${{ secrets.POE_API_KEY }}
