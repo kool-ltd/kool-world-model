@@ -1,5 +1,4 @@
 import { OpenAI } from 'openai';
-import { Octokit } from '@octokit/rest';
 import fs from 'fs';
 import path from 'path';
 
@@ -8,13 +7,10 @@ const openai = new OpenAI({
   baseURL: 'https://api.poe.com/v1',
 });
 
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-const OWNER = process.env.GITHUB_REPOSITORY.split('/')[0];
-const REPO = process.env.GITHUB_REPOSITORY.split('/')[1];
-
 async function getSchemaAndIndex() {
   const schema = fs.readFileSync('wiki/schema.md', 'utf8');
-  const index = fs.readFileSync('wiki/index.md', 'utf8') || '# World Model Index\n\n';
+  let index = '# World Model Index\n\n';
+  try { index = fs.readFileSync('wiki/index.md', 'utf8'); } catch {}
   return { schema, index };
 }
 
@@ -23,7 +19,6 @@ async function main() {
 
   const { schema, index } = await getSchemaAndIndex();
 
-  // Get new/changed sources
   const sources = fs.readdirSync('sources')
     .filter(f => f.endsWith('.md'))
     .map(f => ({
@@ -31,59 +26,46 @@ async function main() {
       content: fs.readFileSync(`sources/${f}`, 'utf8')
     }));
 
-  if (sources.length === 0) {
-    console.log('No new sources. Running health check...');
-  }
-
   const prompt = `
 ${schema}
 
 CURRENT INDEX:
 ${index}
 
-NEW/UPDATED SOURCES:
-${sources.map(s => `--- FILE: ${s.name} ---\n${s.content}\n`).join('\n')}
+NEW OR UPDATED SOURCES:
+${sources.map(s => `--- FILE: ${s.name} ---\n${s.content}\n`).join('\n') || 'No new sources this run.'}
 
-Output ONLY a valid JSON array of file updates:
+Output ONLY a valid JSON array like this (no extra text, no markdown code blocks):
 [
   {"path": "wiki/some-page.md", "content": "full markdown here"},
   {"path": "wiki/index.md", "content": "..."},
   {"path": "wiki/log.md", "content": "..."}
-]
-Never add extra text.`;
+]`;
 
   const completion = await openai.chat.completions.create({
-    model: "Gemini-3.1-Pro",        // ← change here or make dynamic
+    model: "Gemini-3.1-Pro",
     messages: [{ role: "user", content: prompt }],
     temperature: 0.3,
     max_tokens: 32000,
   });
 
-  const jsonStr = completion.choices[0].message.content.trim();
+  let jsonStr = completion.choices[0].message.content.trim();
+  // Clean common LLM wrappers
+  jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+
   const updates = JSON.parse(jsonStr);
 
-  // Apply updates
   for (const update of updates) {
     const fullPath = update.path;
     fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-    fs.writeFileSync(fullPath, update.content);
-    console.log(`✅ Updated ${fullPath}`);
+    fs.writeFileSync(fullPath, update.content, 'utf8');
+    console.log(`✅ Wrote ${fullPath}`);
   }
 
-  // Commit & push
-  await octokit.repos.createOrUpdateFiles({
-    owner: OWNER,
-    repo: REPO,
-    branch: 'main',
-    changes: updates.map(u => ({
-      path: u.path,
-      content: Buffer.from(u.content).toString('base64'),
-      encoding: 'base64',
-    })),
-    message: `🤖 World model update - ${new Date().toISOString()}`,
-  });
-
-  console.log('✅ World model updated successfully!');
+  console.log('✅ All files written. Git commit will happen next in workflow.');
 }
 
-main().catch(console.error);
+main().catch(e => {
+  console.error('❌ Error:', e);
+  process.exit(1);
+});
