@@ -1,0 +1,24 @@
+name: Maintain World Model
+on:
+  push:
+    paths: ['sources/**']
+  workflow_dispatch:      # manual trigger from UI or Telegram
+  schedule:
+    - cron: '0 3 * * *'   # nightly at 3 AM UTC
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        run: npm ci
+      - name: Run maintenance
+        run: node maintain.js
+        env:
+          POE_API_KEY: ${{ secrets.POE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
