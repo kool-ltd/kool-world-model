@@ -40,7 +40,7 @@ Example:
 ]`;
 
   const completion = await openai.chat.completions.create({
-    model: "Gemini-3.1-Pro",
+    model: "Gemini-3-Flash",
     messages: [{ role: "user", content: prompt }],
     temperature: 0.2,
     max_tokens: 32000,
