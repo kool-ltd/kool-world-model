@@ -1,0 +1,44 @@
+name: Maintain World Model
+on:
+  push:
+    paths: ['sources/**']
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
+
+permissions:
+  contents: write   # ← critical for git push
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}   # built-in token now works here
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Run maintenance (LLM writes files)
+        run: node maintain.js
+        env:
+          POE_API_KEY: ${{ secrets.POE_API_KEY }}
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          if git diff --cached --quiet; then
+            echo "✅ No changes to commit"
+          else
+            git commit -m "🤖 World model auto-update — $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            git push
+            echo "✅ Wiki updated and pushed!"
+          fi
