@@ -341,16 +341,17 @@ Be very selective. Do NOT add greetings, generic advice, or one-off questions.
 
 You MUST respond EXACTLY in the following format. No extra text, no thinking, no markdown, no code fences.
 
+Example of valid output:
 <JSON>
 {{
-  "updates": [
-    {{
-      "filename": "wiki/kool_brand.md",
-      "content": "# Kool Brand\\n\\nFull markdown content here with clear sections."
-    }}
-  ],
-  "skip_reason": ""   // only fill if updates list is empty
+  "updates": [{{"filename": "wiki/products.md", "content": "# Products\\n- Nesting Pots"}}],
+  "skip_reason": ""
 }}
+</JSON>
+
+If nothing to add:
+<JSON>
+{{"updates": [], "skip_reason": "No new technical specs shared."}}
 </JSON>
 
 Rules:
@@ -364,59 +365,98 @@ Rules:
 # WIKI UPDATER — runs after every single message
 # ══════════════════════════════════════════════════════════════════════════════
 
+def extract_json(text: str) -> str:
+    """
+    Cleans and extracts JSON from a potentially messy LLM response.
+    """
+    # 1. Remove "Thinking" tags (for models like DeepSeek or Gemini-3-Thought)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # 2. Try to find content specifically wrapped in <JSON> tags
+    tag_match = re.search(r"<JSON>(.*?)</JSON>", text, re.DOTALL | re.IGNORECASE)
+    if tag_match:
+        return tag_match.group(1).strip()
+    
+    # 3. Fallback: Find the outermost curly braces {}
+    match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    return text.strip()
+
+
 def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg: str) -> dict:
     """
-    Called after every message exchange.
-    Returns a result dict: {updated, files, skip_reason, error, raw}
+    Analyzes the latest exchange and updates the GitHub wiki if necessary.
     """
-    wiki   = load_wiki()
+    wiki = load_wiki()
     prompt = build_wiki_update_prompt(wiki, last_user_msg, last_ai_msg, username)
 
     raw, poe_err = call_poe(FLASH_BOT, [{"role": "user", "content": prompt}])
 
     if poe_err:
-        return {"updated": False, "files": [], "skip_reason": "", "error": poe_err, "raw": ""}
-
-        # ── Parse JSON ─────────────────────────────────────────────────────────
-    import re
-
-    clean_raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
-
-    # Extract between <JSON> tags if present
-    if "<JSON>" in clean_raw and "</JSON>" in clean_raw:
-        clean = clean_raw.split("<JSON>")[1].split("</JSON>")[0].strip()
-    else:
-        # Aggressive cleanup for common Gemini issues
-        clean = re.sub(r"```(?:json)?\s*", "", clean_raw, flags=re.IGNORECASE)
-        clean = re.sub(r"```\s*$", "", clean, flags=re.IGNORECASE)
-        clean = clean.strip()
-
-        # Find the first { and last } 
-        start = clean.find("{")
-        end = clean.rfind("}") + 1
-        if start != -1 and end > start:
-            clean = clean[start:end]
-
-    if not clean or not (clean.startswith("{") and clean.endswith("}")):
         return {
-            "updated": False, "files": [], "skip_reason": "",
-            "error": "Flash did not return valid JSON structure.",
-            "raw": raw[:800],
+            "updated": False, 
+            "files": [], 
+            "skip_reason": "", 
+            "error": f"Poe API Error: {poe_err}", 
+            "raw": ""
         }
 
+    # ── Hardened Extraction Logic ───────────────────────────────────────────
+    clean_json_str = extract_json(raw)
+
     try:
-        data = json.loads(clean)
+        data = json.loads(clean_json_str)
     except json.JSONDecodeError as e:
-        # Last resort: try to extract with raw_decode
-        try:
-            decoder = json.JSONDecoder()
-            data, _ = decoder.raw_decode(clean)
-        except Exception as e2:
-            return {
-                "updated": False, "files": [], "skip_reason": "",
-                "error": f"JSON parse failed: {str(e2)}",
-                "raw": raw[:800],
-            }
+        return {
+            "updated": False, 
+            "files": [], 
+            "skip_reason": "",
+            "error": f"JSON Parse Failed: {str(e)}",
+            "raw": raw[:1000],  # Include more raw data for debugging
+        }
+
+    # ── Process Updates ─────────────────────────────────────────────────────
+    updates = data.get("updates", [])
+    skip_reason = data.get("skip_reason", "")
+    
+    files_saved = []
+    file_errors = []
+
+    for item in updates:
+        fname = item.get("filename", "").strip()
+        content = item.get("content", "").strip()
+
+        if not fname or not content:
+            continue
+
+        # Get current SHA to allow updating existing files
+        _, sha = gh_get_file(fname)
+
+        ok, err = gh_put_file(
+            fname, 
+            content, 
+            sha,
+            f"Wiki Update — {username} — {datetime.date.today()}",
+        )
+        
+        if ok:
+            files_saved.append(fname)
+        else:
+            file_errors.append(f"{fname}: {err}")
+
+    # Clear the local Streamlit cache so the UI shows the new data immediately
+    if files_saved:
+        refresh_wiki_cache()
+
+    return {
+        "updated": bool(files_saved),
+        "files": files_saved,
+        "skip_reason": skip_reason,
+        "error": "; ".join(file_errors) if file_errors else "",
+        "raw": raw[:800],
+    }
 
     updates = data.get("updates", []) if isinstance(data, dict) else []
     skip_reason = data.get("skip_reason", "") if isinstance(data, dict) else ""
