@@ -326,38 +326,30 @@ Be direct, concise, and strategic."""
 
 def build_wiki_update_prompt(wiki: str, last_user_msg: str, last_ai_msg: str, username: str) -> str:
     today = datetime.date.today().isoformat()
-    return f"""You are an extremely precise company knowledge manager.
+    return f"""TASK: Extract permanent company knowledge from the LATEST EXCHANGE.
+    
+JSON SCHEMA:
+{{
+  "updates": [
+    {{
+      "filename": "string (wiki/name.md)",
+      "content": "string (full markdown)"
+    }}
+  ],
+  "skip_reason": "string (only if updates is empty)"
+}}
 
-CURRENT WIKI CONTENT:
-{wiki if wiki else "The wiki is currently empty."}
+RULES:
+1. Output ONLY valid JSON.
+2. No conversational filler, no "Here is the JSON," no "Thinking" blocks.
+3. If no new knowledge is found, return updates as an empty list and provide a skip_reason.
+4. Existing Wiki Context: {wiki if wiki else "Empty"}
 
 LATEST EXCHANGE:
-User ({username}) on {today}: {last_user_msg}
-AI Manager: {last_ai_msg}
+User ({username}): {last_user_msg}
+AI: {last_ai_msg}
 
-TASK:
-Decide if this exchange contains **new, permanent, company-specific knowledge** (facts about products, brands, strategies, capabilities, processes, team, decisions, etc.).
-Be very selective. Do NOT add greetings, generic advice, or one-off questions.
-
-You MUST respond EXACTLY in the following format. No extra text, no thinking, no markdown, no code fences.
-
-Example of valid output:
-<JSON>
-{{
-  "updates": [{{"filename": "wiki/products.md", "content": "# Products\\n- Nesting Pots"}}],
-  "skip_reason": ""
-}}
-</JSON>
-
-If nothing to add:
-<JSON>
-{{"updates": [], "skip_reason": "No new technical specs shared."}}
-</JSON>
-
-Rules:
-- Filenames must be lowercase snake_case and start with "wiki/" (e.g. wiki/company_overview.md, wiki/kool_brand.md, wiki/products.md).
-- If updating an existing file, provide the **complete** new content (merge old + new).
-- If nothing worth adding permanently: {{"updates": [], "skip_reason": "one short reason why nothing was added"}}
+JSON OUTPUT:
 """
 
 
