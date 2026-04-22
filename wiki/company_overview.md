@@ -1,12 +1,11 @@
 # Company Overview
 
 ## General Information
-- **Company Name:** Kool Ltd.
 - **Industry:** Manufacturing
 - **Specialization:** Kitchenware and Outdoor Lifestyle Gear
 
 ## Business Focus
-Kool Ltd. is a specialized manufacturing entity. While rooted in the kitchenware sector, the company is currently executing a strategic pivot into the car camping market for 2026. This shift aims to leverage existing manufacturing infrastructure to enter a high-margin, lifestyle-driven outdoor segment.
+Specialized manufacturing entity. While rooted in the kitchenware sector, the company is currently executing a strategic pivot into the car camping market for 2026. This shift aims to leverage existing manufacturing infrastructure to enter a high-margin, lifestyle-driven outdoor segment.
 
 ## Manufacturing Capabilities
 - **Plastic Injection Molding:** Strong internal capability for rigid components and impact-resistant shells.
