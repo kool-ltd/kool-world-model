@@ -26,63 +26,42 @@ st.set_page_config(
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CUSTOM CSS — clean minimalist dark theme
+# CUSTOM CSS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-}
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
-/* Dark background */
-.stApp {
-    background-color: #0e0e10;
-    color: #e8e6e3;
-}
+.stApp { background-color: #0e0e10; color: #e8e6e3; }
 
-/* Chat messages */
 [data-testid="stChatMessage"] {
     background: #1a1a1f !important;
     border: 1px solid #2a2a35 !important;
     border-radius: 8px !important;
     margin-bottom: 8px !important;
 }
-
-/* Input box */
 [data-testid="stChatInput"] textarea {
     background: #1a1a1f !important;
     border: 1px solid #3a3a50 !important;
     color: #e8e6e3 !important;
-    font-family: 'IBM Plex Sans', sans-serif !important;
 }
-
-/* Sidebar */
 [data-testid="stSidebar"] {
     background: #12121a !important;
     border-right: 1px solid #2a2a35 !important;
 }
-
-/* Metrics */
 [data-testid="metric-container"] {
     background: #1a1a1f;
     border: 1px solid #2a2a35;
     border-radius: 8px;
     padding: 12px;
 }
-
-/* Buttons */
 .stButton > button {
     font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important;
     border-radius: 4px !important;
 }
-
-/* Divider */
 hr { border-color: #2a2a35 !important; }
-
-/* Monospace tag */
 code {
     font-family: 'IBM Plex Mono', monospace !important;
     background: #1f1f2e !important;
@@ -95,19 +74,19 @@ code {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECRETS — set in Streamlit Cloud > App Settings > Secrets
+# SECRETS
 # ══════════════════════════════════════════════════════════════════════════════
 try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
-    GITHUB_REPO  = st.secrets["GITHUB_REPO"]   # e.g. "yourname/ai-manager-data"
+    GITHUB_REPO  = st.secrets["GITHUB_REPO"]
     POE_API_KEY  = st.secrets["POE_API_KEY"]
 except KeyError as missing:
-    st.error(f"⚠️ Missing secret: `{missing}`. See the README for setup instructions.")
+    st.error(f"⚠️ Missing secret: `{missing}`. Check Streamlit Cloud → App Settings → Secrets.")
     st.stop()
 
-MAIN_BOT    = st.secrets.get("MAIN_BOT",  "gemini-3.1-pro")   # main conversation model
-FLASH_BOT   = st.secrets.get("FLASH_BOT", "gemini-3-flash")   # fast model for wiki & summaries
-MAX_HISTORY = 20   # messages before auto-offload
+MAIN_BOT    = st.secrets.get("MAIN_BOT",  "gemini-3.1-pro")
+FLASH_BOT   = st.secrets.get("FLASH_BOT", "gemini-3-flash")
+MAX_HISTORY = 20
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -136,8 +115,12 @@ def gh_get_file(path: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def gh_put_file(path: str, content: str, sha: Optional[str] = None,
-                message: str = "AI Manager update") -> bool:
-    """Create or update a file on GitHub. Returns True on success."""
+                message: str = "AI Manager update") -> tuple[bool, str]:
+    """
+    Create or update a file on GitHub.
+    Returns (success: bool, error_detail: str).
+    sha is required when UPDATING an existing file; omit when CREATING.
+    """
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
     payload = {
         "message": message,
@@ -147,13 +130,16 @@ def gh_put_file(path: str, content: str, sha: Optional[str] = None,
         payload["sha"] = sha
     try:
         r = requests.put(url, headers=_gh_headers(), json=payload, timeout=15)
-        return r.status_code in [200, 201]
-    except Exception:
-        return False
+        if r.status_code in [200, 201]:
+            return True, ""
+        err = r.json().get("message", r.text)[:400]
+        return False, f"GitHub {r.status_code}: {err}"
+    except Exception as e:
+        return False, str(e)[:300]
 
 
 def gh_list_dir(path: str) -> list[tuple[str, str]]:
-    """List files in a GitHub directory. Returns [(name, full_path), ...]."""
+    """List files in a GitHub directory. Returns [(name, full_path)]."""
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
     try:
         r = requests.get(url, headers=_gh_headers(), timeout=15)
@@ -165,15 +151,12 @@ def gh_list_dir(path: str) -> list[tuple[str, str]]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WIKI — living knowledge base
+# WIKI
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=90, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_wiki() -> str:
-    """
-    Fetch all wiki/*.md files from GitHub and merge into one context block.
-    Cached for 90 seconds to avoid hammering the GitHub API on every message.
-    """
+    """Load all wiki/*.md files from GitHub into one context string. Cached 60s."""
     files = gh_list_dir("wiki")
     if not files:
         return ""
@@ -182,19 +165,18 @@ def load_wiki() -> str:
         if not name.endswith(".md"):
             continue
         content, _ = gh_get_file(path)
-        if content:
+        if content and content.strip():
             title = name.replace(".md", "").replace("_", " ").title()
             parts.append(f"### {title}\n\n{content.strip()}")
     return "\n\n---\n\n".join(parts)
 
 
 def refresh_wiki_cache():
-    """Bust the wiki cache so the next load_wiki() call fetches fresh data."""
     load_wiki.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CHAT HISTORY — per-user JSON stored on GitHub
+# CHAT HISTORY
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_chat_history(username: str) -> tuple[list, Optional[str]]:
@@ -208,13 +190,12 @@ def load_chat_history(username: str) -> tuple[list, Optional[str]]:
 
 
 def save_chat_history(username: str, messages: list, sha: Optional[str]) -> Optional[str]:
-    """Persist messages to GitHub and return the new file SHA."""
     path = f"chat_history_{username}.json"
-    ok = gh_put_file(
+    ok, _ = gh_put_file(
         path,
         json.dumps(messages, ensure_ascii=False, indent=2),
         sha,
-        f"Chat update — {username} — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        f"Chat update — {username} — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
     )
     if ok:
         _, new_sha = gh_get_file(path)
@@ -223,12 +204,8 @@ def save_chat_history(username: str, messages: list, sha: Optional[str]) -> Opti
 
 
 def load_last_summary(username: str) -> str:
-    """Return the most recent session summary for this user."""
     files = gh_list_dir("summaries")
-    user_files = sorted(
-        [(n, p) for n, p in files if username in n],
-        reverse=True   # most recent first (filenames start with timestamp)
-    )
+    user_files = sorted([(n, p) for n, p in files if username in n], reverse=True)
     if user_files:
         content, _ = gh_get_file(user_files[0][1])
         return content or ""
@@ -236,24 +213,23 @@ def load_last_summary(username: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# POE API — async wrapped to run safely in Streamlit
+# POE API
 # ══════════════════════════════════════════════════════════════════════════════
 
-def call_poe(bot_name: str, messages: list[dict]) -> str:
+def call_poe(bot_name: str, messages: list[dict]) -> tuple[str, str]:
     """
     Call a Poe bot synchronously.
-    Runs the async Poe client in a fresh background thread to avoid
-    conflicting with Streamlit's own event loop.
+    Returns (response_text, error_message). One of them will be empty.
+    Runs async in a background thread to avoid Streamlit event loop conflicts.
     """
     import fastapi_poe as fp
 
-    result: list[str] = []
+    result:     list[str] = []
     error_info: list[str] = []
 
     async def _run():
         protocol_messages = []
         for m in messages:
-            # Poe uses "bot" where OpenAI uses "assistant"
             role = "bot" if m["role"] == "assistant" else m["role"]
             protocol_messages.append(fp.ProtocolMessage(role=role, content=m["content"]))
         full = ""
@@ -277,8 +253,10 @@ def call_poe(bot_name: str, messages: list[dict]) -> str:
     t.join(timeout=120)
 
     if error_info:
-        return f"⚠️ Poe API error: {error_info[0][:300]}"
-    return result[0] if result else "⚠️ No response received. Please try again."
+        return "", f"Poe API error ({bot_name}): {error_info[0][:400]}"
+    if not result:
+        return "", f"No response from {bot_name} — timeout or empty reply"
+    return result[0], ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -287,23 +265,13 @@ def call_poe(bot_name: str, messages: list[dict]) -> str:
 
 def build_system_prompt(wiki: str, last_summary: str, username: str) -> str:
     today = datetime.date.today().strftime("%A, %B %d, %Y")
-
-    wiki_block = (
-        wiki if wiki
-        else "No entries yet. The knowledge base will grow as you have more conversations."
-    )
-    summary_block = (
-        last_summary if last_summary
-        else "No previous session summaries yet."
-    )
-
+    wiki_block    = wiki         if wiki         else "No entries yet. The wiki will grow from conversations."
+    summary_block = last_summary if last_summary else "No previous session summaries yet."
     return f"""You are an AI Manager — a strategic, knowledgeable, and proactive assistant built to help this team run and grow their company.
 
 You have a growing company knowledge base (LLM Wiki) below. Reference it naturally when relevant. Speak like a senior advisor who knows this company deeply — not a generic assistant.
 
-You have web search capabilities. Use them when current information, recent news, or market data is needed.
-
-When the conversation reveals new company information (decisions, strategies, product details, team changes, etc.), acknowledge it — it will be added to the wiki automatically.
+You have web search capabilities. Use them when current information or recent data is needed.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COMPANY KNOWLEDGE BASE (LLM Wiki)
@@ -323,264 +291,279 @@ Today: {today}
 Be direct, concise, and strategic."""
 
 
-def build_wiki_update_prompt(wiki: str, transcript: str, username: str) -> str:
+def build_wiki_update_prompt(wiki: str, last_user_msg: str, last_ai_msg: str, username: str) -> str:
+    """
+    Runs after EVERY message exchange — Flash only inspects the latest user+AI pair.
+    Fast and cheap; most calls will return empty updates.
+    """
     today = datetime.date.today().isoformat()
-    return f"""You are a knowledge manager for a growing company. Your job is to keep the company's LLM Wiki up to date — a living, growing knowledge base inspired by how an LLM builds a world model.
-
-Analyze the conversation transcript below. Extract any new facts, decisions, strategies, products, team information, processes, goals, clients, or company context worth preserving.
+    return f"""You are a company knowledge manager. After each conversation exchange, you decide if any new company information should be saved to the wiki.
 
 CURRENT WIKI:
-{wiki if wiki else "Empty — no entries yet. Create wiki files from scratch if there is useful information."}
+{wiki if wiki else "Empty — no entries yet. Create wiki files if useful company information appears."}
 
-CONVERSATION (user: {username}, date: {today}):
-{transcript}
+LATEST EXCHANGE (user: {username}, date: {today}):
+USER: {last_user_msg}
 
-Respond ONLY in raw valid JSON. No markdown code fences, no explanation, nothing before or after the JSON:
+AI MANAGER: {last_ai_msg}
+
+TASK: Extract any NEW facts, decisions, strategies, products, team info, processes, goals, or context about the company that is worth storing permanently. Be selective — only add genuinely useful, lasting company knowledge. Skip greetings, one-off questions, generic advice, or anything not specific to this company.
+
+You MUST respond in raw valid JSON only. No markdown code fences (no ```), no explanation text, no preamble — start your response with {{ and end with }}:
 {{
   "updates": [
     {{
       "filename": "wiki/topic_name.md",
-      "action": "create_or_update",
-      "content": "# Topic Title\\n\\nFull markdown content. Use headers and bullet points for clarity."
+      "content": "# Topic Title\\n\\nFull markdown content. Use clear headers and bullet points."
     }}
   ],
-  "summary": "2-3 sentences summarising the key points of this conversation."
+  "skip_reason": "one sentence explaining why nothing was added (only fill this if updates is empty)"
 }}
 
 Filename rules:
-- Lowercase snake_case only: wiki/company_overview.md, wiki/products.md, wiki/team.md, wiki/strategy.md, wiki/clients.md, wiki/processes.md, wiki/goals.md
-- If UPDATING an existing file, rewrite the FULL file content (not just the new part)
-- Group related information into the same file; avoid fragmentation
-- Always write the summary even if there are no wiki updates
-- If nothing new: {{"updates": [], "summary": "..."}}"""
+- Lowercase snake_case only: wiki/company_overview.md, wiki/products.md, wiki/team.md, wiki/strategy.md, wiki/clients.md, wiki/processes.md, wiki/goals.md, wiki/financials.md
+- If UPDATING an existing file, rewrite the FULL file content merging old and new information
+- If nothing new to add: {{"updates": [], "skip_reason": "reason here"}}"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WIKI UPDATER — called at end of session or when history is full
+# WIKI UPDATER — runs after every single message
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_wiki_update(username: str, messages: list) -> list[str]:
+def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg: str) -> dict:
     """
-    Ask the Flash model to:
-      1. Identify new company information from the conversation
-      2. Create or update wiki .md files on GitHub
-      3. Write a session summary and save it
-
-    Returns a list of human-readable status lines.
+    Called after every message exchange.
+    Returns a result dict: {updated, files, skip_reason, error, raw}
     """
-    wiki = load_wiki()
-    transcript = "\n".join(
-        f"{'USER' if m['role'] == 'user' else 'AI MANAGER'} ({username if m['role'] == 'user' else 'bot'}): {m['content']}"
-        for m in messages
-    )
-    prompt = build_wiki_update_prompt(wiki, transcript, username)
+    wiki   = load_wiki()
+    prompt = build_wiki_update_prompt(wiki, last_user_msg, last_ai_msg, username)
 
-    status = []
+    raw, poe_err = call_poe(FLASH_BOT, [{"role": "user", "content": prompt}])
+
+    if poe_err:
+        return {"updated": False, "files": [], "skip_reason": "", "error": poe_err, "raw": ""}
+
+    # ── Parse JSON ─────────────────────────────────────────────────────────
+    clean = re.sub(r"```json\s*|```\s*", "", raw).strip()
+    start = clean.find("{")
+    end   = clean.rfind("}") + 1
+
+    if start < 0 or end <= start:
+        return {
+            "updated": False, "files": [], "skip_reason": "",
+            "error": "Flash returned no valid JSON object.",
+            "raw": raw[:600],
+        }
+
+    clean = clean[start:end]
+
     try:
-        raw = call_poe(FLASH_BOT, [{"role": "user", "content": prompt}])
-
-        # Strip markdown fences if the model wraps response anyway
-        clean = re.sub(r"```json\s*|```\s*", "", raw).strip()
-
-        # Find the outermost JSON object
-        start = clean.find("{")
-        end   = clean.rfind("}") + 1
-        if start >= 0 and end > start:
-            clean = clean[start:end]
-
         data = json.loads(clean)
-
-        # ── Update wiki files ──────────────────────────────────────────────
-        for update in data.get("updates", []):
-            fname   = update.get("filename", "").strip()
-            content = update.get("content", "").strip()
-            if not fname or not content:
-                continue
-            _, sha = gh_get_file(fname)
-            ok = gh_put_file(
-                fname, content, sha,
-                f"Wiki update — {username} — {datetime.date.today()}"
-            )
-            action = "✅ Updated" if ok else "❌ Failed"
-            status.append(f"{action} `{fname}`")
-
-        # ── Save session summary ───────────────────────────────────────────
-        summary_text = data.get("summary", "").strip()
-        if summary_text:
-            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-            summary_path = f"summaries/{ts}_{username}.md"
-            summary_md = (
-                f"# Session Summary\n"
-                f"**User:** {username}  \n"
-                f"**Date:** {ts.replace('_', ' ')}\n\n"
-                f"{summary_text}\n"
-            )
-            ok = gh_put_file(summary_path, summary_md, None,
-                             f"Session summary — {username} — {ts}")
-            status.append(f"{'✅' if ok else '❌'} Summary → `{summary_path}`")
-
-        if not status:
-            status.append("ℹ️ No new information to add to wiki this session.")
-
-        refresh_wiki_cache()
-        return status
-
     except json.JSONDecodeError as e:
-        return [f"❌ JSON parse error: {str(e)[:200]}", f"Raw response: {raw[:300]}"]
-    except Exception as e:
-        return [f"❌ Wiki update error: {str(e)[:300]}"]
+        return {
+            "updated": False, "files": [], "skip_reason": "",
+            "error": f"JSON parse failed: {e}",
+            "raw": raw[:600],
+        }
+
+    updates     = data.get("updates", [])
+    skip_reason = data.get("skip_reason", "")
+    files_saved = []
+    file_errors = []
+
+    for item in updates:
+        fname   = item.get("filename", "").strip()
+        content = item.get("content",  "").strip()
+
+        if not fname or not content:
+            continue
+
+        # Get SHA if file already exists (needed for updates, None for creates)
+        _, sha = gh_get_file(fname)
+
+        ok, err = gh_put_file(
+            fname, content, sha,
+            f"Wiki — {username} — {datetime.date.today()}",
+        )
+        if ok:
+            files_saved.append(fname)
+        else:
+            file_errors.append(f"`{fname}`: {err}")
+
+    if files_saved:
+        refresh_wiki_cache()
+
+    return {
+        "updated":     bool(files_saved),
+        "files":       files_saved,
+        "skip_reason": skip_reason,
+        "error":       "; ".join(file_errors) if file_errors else "",
+        "raw":         raw[:600],
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STREAMLIT UI
 # ══════════════════════════════════════════════════════════════════════════════
 
-def render_sidebar() -> Optional[str]:
-    """Render sidebar, return username or None if not set."""
+def render_sidebar(username: str):
+    """Sidebar after username is confirmed."""
+    with st.sidebar:
+        # Username is shown at top already — skip repeating it
+        st.divider()
+
+        # Wiki file list
+        st.markdown("**📚 Knowledge Base**")
+        wiki_files = gh_list_dir("wiki")
+        md_files   = [(n, p) for n, p in wiki_files if n.endswith(".md")]
+        if md_files:
+            for name, _ in md_files:
+                label = name.replace(".md", "").replace("_", " ").title()
+                st.caption(f"  📄 {label}")
+        else:
+            st.caption("  *(empty — grows automatically)*")
+
+        st.divider()
+
+        # Session progress
+        msg_count = len(st.session_state.get("messages", []))
+        st.markdown("**Session**")
+        st.caption(f"Messages: {msg_count} / {MAX_HISTORY}")
+        st.progress(min(msg_count / MAX_HISTORY, 1.0))
+
+        # Last wiki check result
+        s = st.session_state.get("last_wiki_status")
+        if s:
+            st.divider()
+            st.markdown("**Last wiki check**")
+            if s.get("error"):
+                st.caption(f"⚠️ {s['error'][:150]}")
+                if s.get("raw"):
+                    with st.expander("🔍 Raw Flash response (debug)"):
+                        st.code(s["raw"], language="text")
+            elif s.get("updated"):
+                for f in s["files"]:
+                    short = f.replace("wiki/", "")
+                    st.caption(f"✅ Updated `{short}`")
+            else:
+                st.caption(f"⏭ {s.get('skip_reason', 'nothing to add')}")
+
+        st.divider()
+        if st.button("🗑️ Clear chat", use_container_width=True,
+                     help="Clears chat without touching the wiki."):
+            st.session_state["messages"]         = []
+            st.session_state["history_sha"]      = None
+            st.session_state["last_wiki_status"] = None
+            st.rerun()
+
+        st.divider()
+        st.caption("Wiki checked automatically after every message.")
+
+
+def main():
+    # ── Username input lives at the very top of the sidebar ─────────────────
     with st.sidebar:
         st.markdown("### 🧠 AI Manager")
         st.caption("Powered by Gemini via Poe API")
         st.divider()
-
-        username = st.text_input(
+        username_raw = st.text_input(
             "Your name",
             placeholder="e.g. alice",
-            help="Each team member uses their own name. Your chat history is stored separately.",
-        ).strip().lower().replace(" ", "_")
+            help="Each person's chat history is stored separately.",
+        )
 
-        if not username:
-            st.info("👆 Enter your name to begin.")
-            return None
+    username = username_raw.strip().lower().replace(" ", "_")
 
-        st.success(f"👤 {username}")
-        st.divider()
-
-        # ── Wiki status ────────────────────────────────────────────────────
-        st.markdown("**📚 Knowledge Base**")
-        wiki_files = gh_list_dir("wiki")
-        if wiki_files:
-            for name, _ in wiki_files:
-                clean_name = name.replace(".md", "").replace("_", " ").title()
-                st.caption(f"  📄 {clean_name}")
-        else:
-            st.caption("  *(empty — grows from conversations)*")
-
-        st.divider()
-
-        # ── Session controls ───────────────────────────────────────────────
-        st.markdown("**Session**")
-
-        msgs = st.session_state.get("messages", [])
-        msg_count = len(msgs)
-        st.caption(f"Messages: {msg_count} / {MAX_HISTORY}")
-        st.progress(min(msg_count / MAX_HISTORY, 1.0))
-
-        if st.button("💾 End Session & Update Wiki", type="primary",
-                     use_container_width=True,
-                     help="Analyses the conversation, updates the wiki, saves a summary."):
-            if msgs:
-                with st.spinner("Analysing conversation…"):
-                    results = run_wiki_update(username, msgs)
-                for r in results:
-                    st.write(r)
-                st.session_state["messages"] = []
-                st.session_state["history_sha"] = None
-                st.success("Done! Wiki updated.")
-                st.rerun()
-            else:
-                st.info("No messages in this session.")
-
-        if st.button("🗑️ Clear chat (no save)", use_container_width=True,
-                     help="Clears the chat without updating the wiki."):
-            st.session_state["messages"] = []
-            st.session_state["history_sha"] = None
-            st.rerun()
-
-        st.divider()
-        st.caption("Data stored on GitHub.  \nWiki updates via Gemini Flash.")
-
-    return username
-
-
-def main():
-    username = render_sidebar()
     if not username:
-        # Landing state — no user entered yet
+        with st.sidebar:
+            st.info("👆 Enter your name to begin.")
         st.markdown("## 🧠 AI Manager")
-        st.markdown("Enter your name in the sidebar to begin.")
+        st.markdown("Enter your name in the sidebar to start.")
         st.stop()
 
-    # ── Load history for this user (once per session / user switch) ─────────
+    with st.sidebar:
+        st.success(f"👤 {username}")
+
+    # ── Load history (once per user) ─────────────────────────────────────────
     if ("messages" not in st.session_state or
             st.session_state.get("current_user") != username):
-        with st.spinner("Loading your chat history…"):
+        with st.spinner("Loading chat history…"):
             history, sha = load_chat_history(username)
-        st.session_state["messages"]    = history
-        st.session_state["history_sha"] = sha
-        st.session_state["current_user"] = username
+        st.session_state["messages"]         = history
+        st.session_state["history_sha"]      = sha
+        st.session_state["current_user"]     = username
+        st.session_state["last_wiki_status"] = None
 
-    # ── Header ──────────────────────────────────────────────────────────────
-    col_title, col_meta1, col_meta2 = st.columns([3, 1, 1])
-    with col_title:
+    render_sidebar(username)
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    c1, c2, c3 = st.columns([3, 1, 1])
+    with c1:
         st.markdown("## 🧠 AI Manager")
-    with col_meta1:
-        wiki_count = len(gh_list_dir("wiki"))
-        st.metric("Wiki files", wiki_count, help="Pages in the company knowledge base")
-    with col_meta2:
-        session_count = len(st.session_state["messages"])
-        st.metric("Session messages", f"{session_count}/{MAX_HISTORY}")
+    with c2:
+        st.metric("Wiki files", len([n for n, _ in gh_list_dir("wiki") if n.endswith(".md")]))
+    with c3:
+        st.metric("Messages", f"{len(st.session_state['messages'])}/{MAX_HISTORY}")
 
     st.divider()
 
-    # ── Chat history display ─────────────────────────────────────────────────
+    # ── Chat display ─────────────────────────────────────────────────────────
     for msg in st.session_state["messages"]:
         avatar = "👤" if msg["role"] == "user" else "🧠"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # ── Chat input ───────────────────────────────────────────────────────────
+    # ── Input ────────────────────────────────────────────────────────────────
     if user_input := st.chat_input("Ask the AI Manager anything…"):
 
-        # 1. Show user message immediately
+        # 1 — show user message
         st.session_state["messages"].append({"role": "user", "content": user_input})
         with st.chat_message("user", avatar="👤"):
             st.markdown(user_input)
 
-        # 2. Build full prompt context
+        # 2 — build context
         wiki         = load_wiki()
         last_summary = load_last_summary(username)
         system_msg   = build_system_prompt(wiki, last_summary, username)
 
-        # Inject system context as a user→bot pair at the start of the thread.
-        # (Poe's API does support a "system" role, but injecting as a
-        # conversation opener is more universally compatible across bots.)
         poe_messages = [
             {"role": "user",      "content": system_msg},
-            {"role": "assistant", "content": (
-                "Understood. I'm your AI Manager — familiar with the company, "
-                "ready to help strategically. What do you need?"
-            )},
+            {"role": "assistant", "content": "Understood. I'm your AI Manager. How can I help?"},
         ] + st.session_state["messages"]
 
-        # 3. Call main model and display response
+        # 3 — get main AI response
         with st.chat_message("assistant", avatar="🧠"):
             with st.spinner("Thinking…"):
-                response = call_poe(MAIN_BOT, poe_messages)
+                response, poe_err = call_poe(MAIN_BOT, poe_messages)
+            if poe_err:
+                st.error(f"⚠️ Main model error: {poe_err}")
+                st.stop()
             st.markdown(response)
 
-        # 4. Append response to session state
         st.session_state["messages"].append({"role": "assistant", "content": response})
 
-        # 5. Auto-offload when history is full
-        if len(st.session_state["messages"]) >= MAX_HISTORY:
-            with st.spinner("📚 History full — archiving and updating wiki…"):
-                results = run_wiki_update(username, st.session_state["messages"])
-            # Keep the most recent 4 messages for conversational continuity
-            st.session_state["messages"] = st.session_state["messages"][-4:]
-            for r in results:
-                st.toast(r, icon="📚")
+        # 4 — AUTO WIKI UPDATE after every single message
+        with st.spinner("📚 Checking wiki for updates…"):
+            wiki_status = run_wiki_update_after_message(username, user_input, response)
 
-        # 6. Persist to GitHub
+        st.session_state["last_wiki_status"] = wiki_status
+
+        # Show result briefly
+        if wiki_status["error"]:
+            st.warning(f"⚠️ Wiki check issue: {wiki_status['error'][:200]}")
+            with st.expander("🔍 Debug info"):
+                st.code(wiki_status.get("raw", "no raw response"), language="text")
+        elif wiki_status["updated"]:
+            for f in wiki_status["files"]:
+                st.toast(f"📄 Wiki updated: {f.replace('wiki/', '')}", icon="✅")
+        # (if skipped, sidebar shows the skip reason — no need to show inline)
+
+        # 5 — trim history if full
+        if len(st.session_state["messages"]) >= MAX_HISTORY:
+            st.session_state["messages"] = st.session_state["messages"][-4:]
+            st.toast("History trimmed. Wiki is up to date.", icon="🔄")
+
+        # 6 — persist chat to GitHub
         new_sha = save_chat_history(
             username,
             st.session_state["messages"],
