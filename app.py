@@ -354,73 +354,137 @@ JSON OUTPUT:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WIKI UPDATER LOGIC
+# WIKI UPDATER — runs after every single message
 # ══════════════════════════════════════════════════════════════════════════════
 
 def extract_json(text: str) -> str:
     """
-    Robustly extracts JSON from LLM text, handling 'Thinking' blocks, 
-    markdown code blocks, and trailing conversational text.
+    Cleans and extracts JSON from a potentially messy LLM response.
     """
-    # 1. Remove Thinking tags
+    # 1. Remove "Thinking" tags (for models like DeepSeek or Gemini-3-Thought)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     
-    # 2. Remove Markdown code blocks if present
-    text = re.sub(r"```json", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"```", "", text)
-
-    # 3. Find the first '{'
-    start_idx = text.find('{')
-    if start_idx == -1:
-        return text.strip()
-
-    # 4. Use raw_decode to find the end of the valid JSON object
-    # This effectively ignores any "Extra data" (trailing text)
-    try:
-        content_to_decode = text[start_idx:]
-        decoder = json.JSONDecoder()
-        obj, end_pos = decoder.raw_decode(content_to_decode)
-        return json.dumps(obj) # Return as clean string
-    except Exception:
-        # Fallback to simple regex if raw_decode fails
-        match = re.search(r"(\{.*\})", text, re.DOTALL)
-        return match.group(1).strip() if match else text.strip()
+    # 2. Try to find content specifically wrapped in <JSON> tags
+    tag_match = re.search(r"<JSON>(.*?)</JSON>", text, re.DOTALL | re.IGNORECASE)
+    if tag_match:
+        return tag_match.group(1).strip()
+    
+    # 3. Fallback: Find the outermost curly braces {}
+    match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    return text.strip()
 
 
 def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg: str) -> dict:
+    """
+    Analyzes the latest exchange and updates the GitHub wiki if necessary.
+    """
     wiki = load_wiki()
-    prompt = f"""TASK: Extract permanent company knowledge from the LATEST EXCHANGE.
-JSON SCHEMA:
-{{
-  "updates": [ {{"filename": "wiki/name.md", "content": "full markdown"}} ],
-  "skip_reason": "string"
-}}
-RULES: Output ONLY valid JSON.
-LATEST EXCHANGE:
-User: {last_user_msg}
-AI: {last_ai_msg}
-"""
-    raw, poe_err = call_poe(FLASH_BOT, [{"role": "user", "content": prompt}])
-    if poe_err: return {"updated": False, "files": [], "error": poe_err}
+    prompt = build_wiki_update_prompt(wiki, last_user_msg, last_ai_msg, username)
 
+    raw, poe_err = call_poe(FLASH_BOT, [{"role": "user", "content": prompt}])
+
+    if poe_err:
+        return {
+            "updated": False, 
+            "files": [], 
+            "skip_reason": "", 
+            "error": f"Poe API Error: {poe_err}", 
+            "raw": ""
+        }
+
+    # ── Hardened Extraction Logic ───────────────────────────────────────────
     clean_json_str = extract_json(raw)
+
     try:
         data = json.loads(clean_json_str)
-    except Exception as e:
-        return {"updated": False, "files": [], "error": f"JSON Parse Failed: {str(e)}", "raw": raw[:500]}
+    except json.JSONDecodeError as e:
+        return {
+            "updated": False, 
+            "files": [], 
+            "skip_reason": "",
+            "error": f"JSON Parse Failed: {str(e)}",
+            "raw": raw[:1000],  # Include more raw data for debugging
+        }
 
+    # ── Process Updates ─────────────────────────────────────────────────────
     updates = data.get("updates", [])
+    skip_reason = data.get("skip_reason", "")
+    
     files_saved = []
+    file_errors = []
+
     for item in updates:
-        fname, content = item.get("filename", "").strip(), item.get("content", "").strip()
-        if fname and content:
-            _, sha = gh_get_file(fname)
-            ok, _ = gh_put_file(fname, content, sha, f"Wiki Update — {username}")
-            if ok: files_saved.append(fname)
+        fname = item.get("filename", "").strip()
+        content = item.get("content", "").strip()
 
-    if files_saved: refresh_wiki_cache()
-    return {"updated": bool(files_saved), "files": files_saved, "skip_reason": data.get("skip_reason", ""), "raw": raw[:500]}
+        if not fname or not content:
+            continue
 
+        # Get current SHA to allow updating existing files
+        _, sha = gh_get_file(fname)
+
+        ok, err = gh_put_file(
+            fname, 
+            content, 
+            sha,
+            f"Wiki Update — {username} — {datetime.date.today()}",
+        )
+        
+        if ok:
+            files_saved.append(fname)
+        else:
+            file_errors.append(f"{fname}: {err}")
+
+    # Clear the local Streamlit cache so the UI shows the new data immediately
+    if files_saved:
+        refresh_wiki_cache()
+
+    return {
+        "updated": bool(files_saved),
+        "files": files_saved,
+        "skip_reason": skip_reason,
+        "error": "; ".join(file_errors) if file_errors else "",
+        "raw": raw[:800],
+    }
+
+    updates = data.get("updates", []) if isinstance(data, dict) else []
+    skip_reason = data.get("skip_reason", "") if isinstance(data, dict) else ""
+    
+    files_saved = []
+    file_errors = []
+
+    for item in updates:
+        fname   = item.get("filename", "").strip()
+        content = item.get("content",  "").strip()
+
+        if not fname or not content:
+            continue
+
+        # Get SHA if file already exists (needed for updates, None for creates)
+        _, sha = gh_get_file(fname)
+
+        ok, err = gh_put_file(
+            fname, content, sha,
+            f"Wiki — {username} — {datetime.date.today()}",
+        )
+        if ok:
+            files_saved.append(fname)
+        else:
+            file_errors.append(f"`{fname}`: {err}")
+
+    if files_saved:
+        refresh_wiki_cache()
+
+    return {
+        "updated":     bool(files_saved),
+        "files":       files_saved,
+        "skip_reason": skip_reason,
+        "error":       "; ".join(file_errors) if file_errors else "",
+        "raw":         raw[:600],
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
