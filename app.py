@@ -309,7 +309,8 @@ AI MANAGER: {last_ai_msg}
 
 TASK: Extract any NEW facts, decisions, strategies, products, team info, processes, goals, or context about the company that is worth storing permanently. Be selective — only add genuinely useful, lasting company knowledge. Skip greetings, one-off questions, generic advice, or anything not specific to this company.
 
-You MUST respond in raw valid JSON only. No markdown code fences (no ```), no explanation text, no preamble — start your response with {{ and end with }}:
+You MUST wrap your final response inside <JSON> and </JSON> tags. Do not use markdown code fences.
+<JSON>
 {{
   "updates": [
     {{
@@ -319,9 +320,10 @@ You MUST respond in raw valid JSON only. No markdown code fences (no ```), no ex
   ],
   "skip_reason": "one sentence explaining why nothing was added (only fill this if updates is empty)"
 }}
+</JSON>
 
 Filename rules:
-- Lowercase snake_case only: wiki/company_overview.md, wiki/products.md, wiki/team.md, wiki/strategy.md, wiki/clients.md, wiki/processes.md, wiki/goals.md, wiki/financials.md
+- Lowercase snake_case only: wiki/company_overview.md, wiki/products.md, wiki/team.md, wiki/strategy.md
 - If UPDATING an existing file, rewrite the FULL file content merging old and new information
 - If nothing new to add: {{"updates": [], "skip_reason": "reason here"}}"""
 
@@ -344,27 +346,41 @@ def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg
         return {"updated": False, "files": [], "skip_reason": "", "error": poe_err, "raw": ""}
 
     # ── Parse JSON ─────────────────────────────────────────────────────────
-    clean = re.sub(r"```json\s*|```\s*", "", raw).strip()
-    start = clean.find("{")
-    end   = clean.rfind("}") + 1
+    import re
+    
+    # 1. Strip out <think> tags if the model natively uses them for reasoning
+    clean_raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    
+    # 2. Extract content between <JSON> tags if present
+    if "<JSON>" in clean_raw and "</JSON>" in clean_raw:
+        clean = clean_raw.split("<JSON>")[1].split("</JSON>")[0].strip()
+    else:
+        # Fallback to the old method if it forgot the tags
+        clean = re.sub(r"```json\s*|```\s*", "", clean_raw).strip()
+        start = clean.find("{")
+        end   = clean.rfind("}") + 1
+        clean = clean[start:end]
 
-    if start < 0 or end <= start:
+    if not clean.startswith("{") or not clean.endswith("}"):
         return {
             "updated": False, "files": [], "skip_reason": "",
-            "error": "Flash returned no valid JSON object.",
+            "error": "Flash returned malformed JSON structure.",
             "raw": raw[:600],
         }
-
-    clean = clean[start:end]
 
     try:
         data = json.loads(clean)
     except json.JSONDecodeError as e:
-        return {
-            "updated": False, "files": [], "skip_reason": "",
-            "error": f"JSON parse failed: {e}",
-            "raw": raw[:600],
-        }
+        # Final safety net: raw_decode stops parsing when it hits extra data
+        try:
+            decoder = json.JSONDecoder()
+            data, _ = decoder.raw_decode(clean)
+        except json.JSONDecodeError as e2:
+            return {
+                "updated": False, "files": [], "skip_reason": "",
+                "error": f"JSON parse failed: {e2}",
+                "raw": raw[:600],
+            }
 
     updates     = data.get("updates", [])
     skip_reason = data.get("skip_reason", "")
