@@ -325,32 +325,32 @@ Be direct, concise, and strategic."""
 
 
 def build_wiki_update_prompt(wiki: str, last_user_msg: str, last_ai_msg: str, username: str) -> str:
+    today = datetime.date.today().isoformat()
     return f"""TASK: Extract permanent company knowledge from the LATEST EXCHANGE.
+    
+JSON SCHEMA:
+{{
+  "updates": [
+    {{
+      "filename": "string (wiki/name.md)",
+      "content": "string (full markdown)"
+    }}
+  ],
+  "skip_reason": "string (only if updates is empty)"
+}}
 
-Existing Wiki Context:
-{wiki if wiki else "Empty"}
+RULES:
+1. Output ONLY valid JSON.
+2. No conversational filler, no "Here is the JSON," no "Thinking" blocks.
+3. If no new knowledge is found, return updates as an empty list and provide a skip_reason.
+4. Existing Wiki Context: {wiki if wiki else "Empty"}
 
 LATEST EXCHANGE:
 User ({username}): {last_user_msg}
 AI: {last_ai_msg}
 
-OUTPUT INSTRUCTIONS:
-- Provide a JSON object following the schema below.
-- Do NOT include any introductory text, "Thinking" blocks, or concluding remarks.
-- If no update is needed, return an empty updates list.
-
-JSON SCHEMA:
-{{
-  "updates": [
-    {{
-      "filename": "wiki/filename.md",
-      "content": "Full markdown content here"
-    }}
-  ],
-  "skip_reason": "string"
-}}
-
-JSON OUTPUT:"""
+JSON OUTPUT:
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -359,28 +359,27 @@ JSON OUTPUT:"""
 
 def extract_json(text: str) -> str:
     """
-    Robustly extracts the first JSON object found in a string, 
-    ignoring markdown fences and trailing conversational text.
+    Cleans and extracts JSON from a potentially messy LLM response.
     """
-    if not text:
-        return ""
-
-    # 1. Remove "Thinking" blocks if present
+    # 1. Remove "Thinking" tags (for models like DeepSeek or Gemini-3-Thought)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     
-    # 2. Find the first '{' and the last '}'
-    start_idx = text.find('{')
-    end_idx = text.rfind('}')
+    # 2. Try to find content specifically wrapped in <JSON> tags
+    tag_match = re.search(r"<JSON>(.*?)</JSON>", text, re.DOTALL | re.IGNORECASE)
+    if tag_match:
+        return tag_match.group(1).strip()
     
-    if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
-        return text.strip() # Return as is, let json.loads handle the error
+    # 3. Fallback: Find the outermost curly braces {}
+    match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
     
-    return text[start_idx : end_idx + 1].strip()
+    return text.strip()
 
 
 def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg: str) -> dict:
     """
-    Analyzes the latest exchange and updates the GitHub wiki.
+    Analyzes the latest exchange and updates the GitHub wiki if necessary.
     """
     wiki = load_wiki()
     prompt = build_wiki_update_prompt(wiki, last_user_msg, last_ai_msg, username)
@@ -388,25 +387,32 @@ def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg
     raw, poe_err = call_poe(FLASH_BOT, [{"role": "user", "content": prompt}])
 
     if poe_err:
-        return {"updated": False, "files": [], "skip_reason": "", "error": f"Poe API Error: {poe_err}", "raw": ""}
+        return {
+            "updated": False, 
+            "files": [], 
+            "skip_reason": "", 
+            "error": f"Poe API Error: {poe_err}", 
+            "raw": ""
+        }
 
+    # ── Hardened Extraction Logic ───────────────────────────────────────────
     clean_json_str = extract_json(raw)
 
     try:
         data = json.loads(clean_json_str)
-        if not isinstance(data, dict):
-            raise ValueError("Response is not a JSON object")
-    except (json.JSONDecodeError, ValueError) as e:
+    except json.JSONDecodeError as e:
         return {
             "updated": False, 
             "files": [], 
             "skip_reason": "",
             "error": f"JSON Parse Failed: {str(e)}",
-            "raw": raw
+            "raw": raw[:1000],  # Include more raw data for debugging
         }
 
+    # ── Process Updates ─────────────────────────────────────────────────────
     updates = data.get("updates", [])
-    skip_reason = data.get("skip_reason", "No changes detected.")
+    skip_reason = data.get("skip_reason", "")
+    
     files_saved = []
     file_errors = []
 
@@ -417,16 +423,14 @@ def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg
         if not fname or not content:
             continue
 
-        # Ensure filename starts with wiki/
-        if not fname.startswith("wiki/"):
-            fname = f"wiki/{fname}"
-
+        # Get current SHA to allow updating existing files
         _, sha = gh_get_file(fname)
+
         ok, err = gh_put_file(
             fname, 
             content, 
             sha,
-            f"Wiki Update — {username} — {datetime.date.today()}"
+            f"Wiki Update — {username} — {datetime.date.today()}",
         )
         
         if ok:
@@ -434,15 +438,52 @@ def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg
         else:
             file_errors.append(f"{fname}: {err}")
 
+    # Clear the local Streamlit cache so the UI shows the new data immediately
     if files_saved:
         refresh_wiki_cache()
 
     return {
         "updated": bool(files_saved),
         "files": files_saved,
-        "skip_reason": skip_reason if not files_saved else "",
+        "skip_reason": skip_reason,
         "error": "; ".join(file_errors) if file_errors else "",
-        "raw": raw[:500]
+        "raw": raw[:800],
+    }
+
+    updates = data.get("updates", []) if isinstance(data, dict) else []
+    skip_reason = data.get("skip_reason", "") if isinstance(data, dict) else ""
+    
+    files_saved = []
+    file_errors = []
+
+    for item in updates:
+        fname   = item.get("filename", "").strip()
+        content = item.get("content",  "").strip()
+
+        if not fname or not content:
+            continue
+
+        # Get SHA if file already exists (needed for updates, None for creates)
+        _, sha = gh_get_file(fname)
+
+        ok, err = gh_put_file(
+            fname, content, sha,
+            f"Wiki — {username} — {datetime.date.today()}",
+        )
+        if ok:
+            files_saved.append(fname)
+        else:
+            file_errors.append(f"`{fname}`: {err}")
+
+    if files_saved:
+        refresh_wiki_cache()
+
+    return {
+        "updated":     bool(files_saved),
+        "files":       files_saved,
+        "skip_reason": skip_reason,
+        "error":       "; ".join(file_errors) if file_errors else "",
+        "raw":         raw[:600],
     }
 
 
