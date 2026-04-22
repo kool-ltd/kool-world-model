@@ -85,7 +85,7 @@ except KeyError as missing:
     st.error(f"⚠️ Missing secret: `{missing}`. Check Streamlit Cloud → App Settings → Secrets.")
     st.stop()
 
-MAIN_BOT    = st.secrets.get("MAIN_BOT",  "gemini-3.1-pro")
+MAIN_BOT    = st.secrets.get("MAIN_BOT",  "gemini-3-flash")
 FLASH_BOT   = st.secrets.get("FLASH_BOT", "gemini-3-flash")
 MAX_HISTORY = 20
 
