@@ -466,13 +466,12 @@ def main():
         st.markdown("### 🧠 AI Manager")
         st.caption("Powered by Gemini via Poe API")
         st.divider()
-        username_raw = st.text_input(
-            "Your name",
-            placeholder="e.g. alice",
-            help="Each person's chat history is stored separately.",
+        username_raw = st.selectbox(
+            "Who are you?",
+            options=["— select —", "Jason", "Francis", "Esther"],
         )
 
-    username = username_raw.strip().lower().replace(" ", "_")
+    username = username_raw.strip().lower().replace(" ", "_") if username_raw != "— select —" else ""
 
     if not username:
         with st.sidebar:
