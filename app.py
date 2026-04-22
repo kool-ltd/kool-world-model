@@ -80,6 +80,7 @@ try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
     GITHUB_REPO  = st.secrets["GITHUB_REPO"]
     POE_API_KEY  = st.secrets["POE_API_KEY"]
+    PASSWORD     = st.secrets["PASSWORD"] # ADD THIS TO YOUR STREAMLIT SECRETS
 except KeyError as missing:
     st.error(f"⚠️ Missing secret: `{missing}`. Check Streamlit Cloud → App Settings → Secrets.")
     st.stop()
@@ -87,6 +88,38 @@ except KeyError as missing:
 MAIN_BOT    = st.secrets.get("MAIN_BOT",  "gemini-3.1-pro")
 FLASH_BOT   = st.secrets.get("FLASH_BOT", "gemini-3-flash")
 MAX_HISTORY = 20
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACCESS CONTROL (Password Gate)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def check_password():
+    """Returns True if the user had the correct password."""
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if st.session_state["password"] == st.secrets["PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # don't store password
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.markdown("### 🧠 AI Manager Login")
+        st.text_input(
+            "Enter password to access the workspace", 
+            type="password", 
+            on_change=password_entered, 
+            key="password"
+        )
+        return False
+    elif not st.session_state["password_correct"]:
+        st.text_input(
+            "Password", type="password", on_change=password_entered, key="password"
+        )
+        st.error("😕 Password incorrect")
+        return False
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -292,98 +325,134 @@ Be direct, concise, and strategic."""
 
 
 def build_wiki_update_prompt(wiki: str, last_user_msg: str, last_ai_msg: str, username: str) -> str:
-    """
-    Runs after EVERY message exchange — Flash only inspects the latest user+AI pair.
-    Fast and cheap; most calls will return empty updates.
-    """
     today = datetime.date.today().isoformat()
-    return f"""You are a company knowledge manager. After each conversation exchange, you decide if any new company information should be saved to the wiki.
-
-CURRENT WIKI:
-{wiki if wiki else "Empty — no entries yet. Create wiki files if useful company information appears."}
-
-LATEST EXCHANGE (user: {username}, date: {today}):
-USER: {last_user_msg}
-
-AI MANAGER: {last_ai_msg}
-
-TASK: Extract any NEW facts, decisions, strategies, products, team info, processes, goals, or context about the company that is worth storing permanently. Be selective — only add genuinely useful, lasting company knowledge. Skip greetings, one-off questions, generic advice, or anything not specific to this company.
-
-You MUST wrap your final response inside <JSON> and </JSON> tags. Do not use markdown code fences.
-<JSON>
+    return f"""TASK: Extract permanent company knowledge from the LATEST EXCHANGE.
+    
+JSON SCHEMA:
 {{
   "updates": [
     {{
-      "filename": "wiki/topic_name.md",
-      "content": "# Topic Title\\n\\nFull markdown content. Use clear headers and bullet points."
+      "filename": "string (wiki/name.md)",
+      "content": "string (full markdown)"
     }}
   ],
-  "skip_reason": "one sentence explaining why nothing was added (only fill this if updates is empty)"
+  "skip_reason": "string (only if updates is empty)"
 }}
-</JSON>
 
-Filename rules:
-- Lowercase snake_case only: wiki/company_overview.md, wiki/products.md, wiki/team.md, wiki/strategy.md
-- If UPDATING an existing file, rewrite the FULL file content merging old and new information
-- If nothing new to add: {{"updates": [], "skip_reason": "reason here"}}"""
+RULES:
+1. Output ONLY valid JSON.
+2. No conversational filler, no "Here is the JSON," no "Thinking" blocks.
+3. If no new knowledge is found, return updates as an empty list and provide a skip_reason.
+4. Existing Wiki Context: {wiki if wiki else "Empty"}
+
+LATEST EXCHANGE:
+User ({username}): {last_user_msg}
+AI: {last_ai_msg}
+
+JSON OUTPUT:
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WIKI UPDATER — runs after every single message
 # ══════════════════════════════════════════════════════════════════════════════
 
+def extract_json(text: str) -> str:
+    """
+    Cleans and extracts JSON from a potentially messy LLM response.
+    """
+    # 1. Remove "Thinking" tags (for models like DeepSeek or Gemini-3-Thought)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # 2. Try to find content specifically wrapped in <JSON> tags
+    tag_match = re.search(r"<JSON>(.*?)</JSON>", text, re.DOTALL | re.IGNORECASE)
+    if tag_match:
+        return tag_match.group(1).strip()
+    
+    # 3. Fallback: Find the outermost curly braces {}
+    match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    return text.strip()
+
+
 def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg: str) -> dict:
     """
-    Called after every message exchange.
-    Returns a result dict: {updated, files, skip_reason, error, raw}
+    Analyzes the latest exchange and updates the GitHub wiki if necessary.
     """
-    wiki   = load_wiki()
+    wiki = load_wiki()
     prompt = build_wiki_update_prompt(wiki, last_user_msg, last_ai_msg, username)
 
     raw, poe_err = call_poe(FLASH_BOT, [{"role": "user", "content": prompt}])
 
     if poe_err:
-        return {"updated": False, "files": [], "skip_reason": "", "error": poe_err, "raw": ""}
-
-    # ── Parse JSON ─────────────────────────────────────────────────────────
-    import re
-    
-    # 1. Strip out <think> tags if the model natively uses them for reasoning
-    clean_raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    
-    # 2. Extract content between <JSON> tags if present
-    if "<JSON>" in clean_raw and "</JSON>" in clean_raw:
-        clean = clean_raw.split("<JSON>")[1].split("</JSON>")[0].strip()
-    else:
-        # Fallback to the old method if it forgot the tags
-        clean = re.sub(r"```json\s*|```\s*", "", clean_raw).strip()
-        start = clean.find("{")
-        end   = clean.rfind("}") + 1
-        clean = clean[start:end]
-
-    if not clean.startswith("{") or not clean.endswith("}"):
         return {
-            "updated": False, "files": [], "skip_reason": "",
-            "error": "Flash returned malformed JSON structure.",
-            "raw": raw[:600],
+            "updated": False, 
+            "files": [], 
+            "skip_reason": "", 
+            "error": f"Poe API Error: {poe_err}", 
+            "raw": ""
         }
 
-    try:
-        data = json.loads(clean)
-    except json.JSONDecodeError as e:
-        # Final safety net: raw_decode stops parsing when it hits extra data
-        try:
-            decoder = json.JSONDecoder()
-            data, _ = decoder.raw_decode(clean)
-        except json.JSONDecodeError as e2:
-            return {
-                "updated": False, "files": [], "skip_reason": "",
-                "error": f"JSON parse failed: {e2}",
-                "raw": raw[:600],
-            }
+    # ── Hardened Extraction Logic ───────────────────────────────────────────
+    clean_json_str = extract_json(raw)
 
-    updates     = data.get("updates", [])
+    try:
+        data = json.loads(clean_json_str)
+    except json.JSONDecodeError as e:
+        return {
+            "updated": False, 
+            "files": [], 
+            "skip_reason": "",
+            "error": f"JSON Parse Failed: {str(e)}",
+            "raw": raw[:1000],  # Include more raw data for debugging
+        }
+
+    # ── Process Updates ─────────────────────────────────────────────────────
+    updates = data.get("updates", [])
     skip_reason = data.get("skip_reason", "")
+    
+    files_saved = []
+    file_errors = []
+
+    for item in updates:
+        fname = item.get("filename", "").strip()
+        content = item.get("content", "").strip()
+
+        if not fname or not content:
+            continue
+
+        # Get current SHA to allow updating existing files
+        _, sha = gh_get_file(fname)
+
+        ok, err = gh_put_file(
+            fname, 
+            content, 
+            sha,
+            f"Wiki Update — {username} — {datetime.date.today()}",
+        )
+        
+        if ok:
+            files_saved.append(fname)
+        else:
+            file_errors.append(f"{fname}: {err}")
+
+    # Clear the local Streamlit cache so the UI shows the new data immediately
+    if files_saved:
+        refresh_wiki_cache()
+
+    return {
+        "updated": bool(files_saved),
+        "files": files_saved,
+        "skip_reason": skip_reason,
+        "error": "; ".join(file_errors) if file_errors else "",
+        "raw": raw[:800],
+    }
+
+    updates = data.get("updates", []) if isinstance(data, dict) else []
+    skip_reason = data.get("skip_reason", "") if isinstance(data, dict) else ""
+    
     files_saved = []
     file_errors = []
 
@@ -588,4 +657,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if check_password():
+        main()
