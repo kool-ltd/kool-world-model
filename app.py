@@ -326,26 +326,30 @@ Be direct, concise, and strategic."""
 
 def build_wiki_update_prompt(wiki: str, last_user_msg: str, last_ai_msg: str, username: str) -> str:
     today = datetime.date.today().isoformat()
-    return f"""TASK: Extract only NEW permanent company knowledge from the latest exchange.
+    return f"""TASK: Extract permanent company knowledge from the latest exchange ONLY.
 
-You MUST respond with **exactly one valid JSON object** and nothing else.
+You must respond with **exactly one valid JSON object** and absolutely nothing else. 
+No explanations, no extra text, no markdown, no code blocks, no trailing content.
 
 JSON SCHEMA:
 {{
   "updates": [
     {{
-      "filename": "wiki/some_name.md",
-      "content": "Full markdown content here"
+      "filename": "wiki/name.md",
+      "content": "Full markdown content for the wiki file"
     }}
   ],
-  "skip_reason": "string only if no updates"
+  "skip_reason": "string (only if updates is empty)"
 }}
 
-RULES:
-- Output ONLY the JSON. No explanations, no markdown, no code blocks, no extra text.
-- Use proper "filename" (e.g. "wiki/retail_channels.md"), not "path".
-- If nothing new to add, return "updates": [] and a short skip_reason.
-- Existing wiki: {wiki if wiki else "No entries yet."}
+STRICT RULES:
+- Output ONLY the raw JSON.
+- Use correct filename like "wiki/retail_channels.md"
+- Keep content concise and well-structured in markdown.
+- If no new permanent knowledge, return "updates": [] with a skip_reason.
+
+Existing Wiki:
+{wiki if wiki else "No entries yet."}
 
 LATEST EXCHANGE:
 User ({username}): {last_user_msg}
@@ -360,34 +364,38 @@ JSON:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def extract_json(text: str) -> str:
-    """Robust JSON extractor that handles multiple JSON blocks, markdown, and extra text."""
+    """Stronger JSON extractor that handles multiple concatenated JSON objects."""
     if not text or not text.strip():
         return "{}"
 
-    # Clean common LLM wrappers
+    # Clean thinking tags and <JSON> wrappers
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<JSON>(.*?)</JSON>", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
-    
-    # Remove markdown code blocks
+
+    # Remove markdown code fences
     text = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```", "", text, flags=re.IGNORECASE)
 
-    # Find ALL JSON-like objects and take only the FIRST complete one
-    # This regex is more precise for nested structures
-    matches = re.findall(r'(\{[\s\S]*?\})', text, re.DOTALL)
-    
-    if matches:
-        # Try each candidate until one parses successfully
-        for candidate in matches:
-            cleaned = candidate.strip()
-            try:
-                # Test parse
-                json.loads(cleaned)
-                return cleaned
-            except json.JSONDecodeError:
-                continue  # try next match if this one is broken
+    # Find the FIRST complete JSON object only (stops at the first balanced } )
+    # This is much more reliable for concatenated outputs
+    match = re.search(r'(\{[\s\S]*?\}\s*(?=\{|$))', text, re.DOTALL)
+    if match:
+        candidate = match.group(1).strip()
+        # Remove anything after the first complete object
+        if '}{' in candidate:
+            candidate = candidate.split('}{')[0] + '}'
+        
+        try:
+            json.loads(candidate)  # validate
+            return candidate
+        except json.JSONDecodeError:
+            pass
 
-    # Ultimate fallback: return the whole cleaned text
+    # Fallback: try to take everything up to the last } 
+    match = re.search(r'(\{[\s\S]*\})', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
     return text.strip()
 
 
