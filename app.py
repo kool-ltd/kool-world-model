@@ -325,40 +325,39 @@ Be direct, concise, and strategic."""
 
 
 def build_wiki_update_prompt(wiki: str, last_user_msg: str, last_ai_msg: str, username: str) -> str:
-    """
-    Runs after EVERY message exchange — Flash only inspects the latest user+AI pair.
-    Fast and cheap; most calls will return empty updates.
-    """
     today = datetime.date.today().isoformat()
-    return f"""You are a company knowledge manager. After each conversation exchange, you decide if any new company information should be saved to the wiki.
+    return f"""You are an extremely precise company knowledge manager.
 
-CURRENT WIKI:
-{wiki if wiki else "Empty — no entries yet. Create wiki files if useful company information appears."}
+CURRENT WIKI CONTENT:
+{wiki if wiki else "The wiki is currently empty."}
 
-LATEST EXCHANGE (user: {username}, date: {today}):
-USER: {last_user_msg}
+LATEST EXCHANGE:
+User ({username}) on {today}: {last_user_msg}
+AI Manager: {last_ai_msg}
 
-AI MANAGER: {last_ai_msg}
+TASK:
+Decide if this exchange contains **new, permanent, company-specific knowledge** (facts about products, brands, strategies, capabilities, processes, team, decisions, etc.).
+Be very selective. Do NOT add greetings, generic advice, or one-off questions.
 
-TASK: Extract any NEW facts, decisions, strategies, products, team info, processes, goals, or context about the company that is worth storing permanently. Be selective — only add genuinely useful, lasting company knowledge. Skip greetings, one-off questions, generic advice, or anything not specific to this company.
+You MUST respond EXACTLY in the following format. No extra text, no thinking, no markdown, no code fences.
 
-You MUST wrap your final response inside <JSON> and </JSON> tags. Do not use markdown code fences.
 <JSON>
 {{
   "updates": [
     {{
-      "filename": "wiki/topic_name.md",
-      "content": "# Topic Title\\n\\nFull markdown content. Use clear headers and bullet points."
+      "filename": "wiki/kool_brand.md",
+      "content": "# Kool Brand\\n\\nFull markdown content here with clear sections."
     }}
   ],
-  "skip_reason": "one sentence explaining why nothing was added (only fill this if updates is empty)"
+  "skip_reason": ""   // only fill if updates list is empty
 }}
 </JSON>
 
-Filename rules:
-- Lowercase snake_case only: wiki/company_overview.md, wiki/products.md, wiki/team.md, wiki/strategy.md
-- If UPDATING an existing file, rewrite the FULL file content merging old and new information
-- If nothing new to add: {{"updates": [], "skip_reason": "reason here"}}"""
+Rules:
+- Filenames must be lowercase snake_case and start with "wiki/" (e.g. wiki/company_overview.md, wiki/kool_brand.md, wiki/products.md).
+- If updating an existing file, provide the **complete** new content (merge old + new).
+- If nothing worth adding permanently: {{"updates": [], "skip_reason": "one short reason why nothing was added"}}
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -378,45 +377,50 @@ def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg
     if poe_err:
         return {"updated": False, "files": [], "skip_reason": "", "error": poe_err, "raw": ""}
 
-    # ── Parse JSON ─────────────────────────────────────────────────────────
+        # ── Parse JSON ─────────────────────────────────────────────────────────
     import re
-    
-    # 1. Strip out <think> tags if the model natively uses them for reasoning
-    clean_raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    
-    # 2. Extract content between <JSON> tags if present
+
+    clean_raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
+
+    # Extract between <JSON> tags if present
     if "<JSON>" in clean_raw and "</JSON>" in clean_raw:
         clean = clean_raw.split("<JSON>")[1].split("</JSON>")[0].strip()
     else:
-        # Fallback to the old method if it forgot the tags
-        clean = re.sub(r"```json\s*|```\s*", "", clean_raw).strip()
-        start = clean.find("{")
-        end   = clean.rfind("}") + 1
-        clean = clean[start:end]
+        # Aggressive cleanup for common Gemini issues
+        clean = re.sub(r"```(?:json)?\s*", "", clean_raw, flags=re.IGNORECASE)
+        clean = re.sub(r"```\s*$", "", clean, flags=re.IGNORECASE)
+        clean = clean.strip()
 
-    if not clean.startswith("{") or not clean.endswith("}"):
+        # Find the first { and last } 
+        start = clean.find("{")
+        end = clean.rfind("}") + 1
+        if start != -1 and end > start:
+            clean = clean[start:end]
+
+    if not clean or not (clean.startswith("{") and clean.endswith("}")):
         return {
             "updated": False, "files": [], "skip_reason": "",
-            "error": "Flash returned malformed JSON structure.",
-            "raw": raw[:600],
+            "error": "Flash did not return valid JSON structure.",
+            "raw": raw[:800],
         }
 
     try:
         data = json.loads(clean)
     except json.JSONDecodeError as e:
-        # Final safety net: raw_decode stops parsing when it hits extra data
+        # Last resort: try to extract with raw_decode
         try:
             decoder = json.JSONDecoder()
             data, _ = decoder.raw_decode(clean)
-        except json.JSONDecodeError as e2:
+        except Exception as e2:
             return {
                 "updated": False, "files": [], "skip_reason": "",
-                "error": f"JSON parse failed: {e2}",
-                "raw": raw[:600],
+                "error": f"JSON parse failed: {str(e2)}",
+                "raw": raw[:800],
             }
 
-    updates     = data.get("updates", [])
-    skip_reason = data.get("skip_reason", "")
+    updates = data.get("updates", []) if isinstance(data, dict) else []
+    skip_reason = data.get("skip_reason", "") if isinstance(data, dict) else ""
+    
     files_saved = []
     file_errors = []
 
