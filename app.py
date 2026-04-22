@@ -326,16 +326,13 @@ Be direct, concise, and strategic."""
 
 def build_wiki_update_prompt(wiki: str, last_user_msg: str, last_ai_msg: str, username: str) -> str:
     today = datetime.date.today().isoformat()
-    return f"""TASK: Extract permanent company knowledge from the LATEST EXCHANGE.
-    
+    return f"""TASK: Extract permanent company knowledge... 
+
+CRITICAL: Respond with **ONLY** valid JSON. No explanations, no markdown, no code blocks, no extra text.
+
 JSON SCHEMA:
 {{
-  "updates": [
-    {{
-      "filename": "string (wiki/name.md)",
-      "content": "string (full markdown)"
-    }}
-  ],
+  "updates": [ ... ],
   "skip_reason": "string (only if updates is empty)"
 }}
 
@@ -358,23 +355,48 @@ JSON OUTPUT:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def extract_json(text: str) -> str:
-    """
-    Cleans and extracts JSON from a potentially messy LLM response.
-    """
-    # 1. Remove "Thinking" tags (for models like DeepSeek or Gemini-3-Thought)
+    """Improved extraction that handles markdown, extra text, and multiple objects."""
+    if not text or not text.strip():
+        return "{}"
+
+    # 1. Strip <think>, <JSON> tags, etc.
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    
-    # 2. Try to find content specifically wrapped in <JSON> tags
-    tag_match = re.search(r"<JSON>(.*?)</JSON>", text, re.DOTALL | re.IGNORECASE)
-    if tag_match:
-        return tag_match.group(1).strip()
-    
-    # 3. Fallback: Find the outermost curly braces {}
-    match = re.search(r"(\{.*\})", text, re.DOTALL)
+    text = re.sub(r"<JSON>(.*?)</JSON>", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
+
+    # 2. Remove markdown code fences (common with LLMs)
+    text = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE)
+
+    # 3. Find the first valid JSON object { ... } (greedy but stops at first complete one)
+    # This is more reliable than the previous simple {.*}
+    match = re.search(r'(\{[\s\S]*?\})', text, re.DOTALL)
     if match:
-        return match.group(1).strip()
-    
+        candidate = match.group(1).strip()
+        # Quick validation attempt
+        try:
+            json.loads(candidate)  # test if it's at least parseable now
+            return candidate
+        except json.JSONDecodeError:
+            # If still broken, try to clean further (e.g. trailing commas)
+            pass
+
+    # Fallback: return the whole cleaned text and let the caller handle the error
     return text.strip()
+
+
+# Then update the parsing section in run_wiki_update_after_message:
+    clean_json_str = extract_json(raw)
+
+    try:
+        data = json.loads(clean_json_str)
+    except json.JSONDecodeError as e:
+        return {
+            "updated": False,
+            "files": [],
+            "skip_reason": "",
+            "error": f"JSON Parse Failed: {str(e)}",
+            "raw": raw[:1500],   # Show more context for debugging
+        }
 
 
 def run_wiki_update_after_message(username: str, last_user_msg: str, last_ai_msg: str) -> dict:
